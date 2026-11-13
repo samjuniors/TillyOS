@@ -47,6 +47,9 @@ import {
   fetchOAuthProviders,
   getOAuthStartUrl,
   disconnectOAuthProvider,
+  discoverOAuthWebsite,
+  configureOAuthConnector,
+  deleteOAuthConnector,
 } from './services/api';
 import {
   initWorkspaceAuth,
@@ -373,8 +376,19 @@ export default function App() {
       }
       if (event.data?.type === 'OAUTH_AUTH_SUCCESS') {
         addLog(`OAUTH CONNECTED: ${String(event.data.provider).toUpperCase()} (${event.data.accountLabel || 'Linked'})`);
+        if (event.data.provider === 'google' && event.data.accessToken) {
+          setWorkspaceUser({
+            email: event.data.accountLabel || 'Google Account',
+            displayName: event.data.accountLabel || 'Google Workspace Direct',
+          });
+          setWorkspaceToken(event.data.accessToken);
+          liveClientRef.current?.setWorkspaceToken(event.data.accessToken);
+        }
         fetchOAuthProviders()
           .then((res) => setOauthProviders(res.providers || []))
+          .catch(() => {});
+        fetchRegisteredSkills()
+          .then((res) => setRegisteredSkills(res.skills || []))
           .catch(() => {});
       }
     };
@@ -734,15 +748,54 @@ export default function App() {
     addLog('GOOGLE WORKSPACE OAUTH SIGNED OUT');
   }, [addLog]);
 
-  const handleConnectOAuth = useCallback(async (provider: 'spotify' | 'github') => {
+  const handleConnectOAuth = useCallback(async (provider: string) => {
     const { url } = await getOAuthStartUrl(provider);
     window.open(url, `oauth_${provider}`, 'width=560,height=700,noopener=no');
   }, []);
 
-  const handleDisconnectOAuth = useCallback(async (provider: 'spotify' | 'github') => {
+  const handleDisconnectOAuth = useCallback(async (provider: string) => {
     await disconnectOAuthProvider(provider);
-    const res = await fetchOAuthProviders();
-    setOauthProviders(res.providers || []);
+    const [provRes, skillRes] = await Promise.all([
+      fetchOAuthProviders(),
+      fetchRegisteredSkills(),
+    ]);
+    setOauthProviders(provRes.providers || []);
+    setRegisteredSkills(skillRes.skills || []);
+  }, []);
+
+  const handleDiscoverWebsiteOAuth = useCallback(async (url: string, name?: string) => {
+    const res = await discoverOAuthWebsite(url, name);
+    const provRes = await fetchOAuthProviders();
+    setOauthProviders(provRes.providers || []);
+    return res;
+  }, []);
+
+  const handleConfigureOAuth = useCallback(
+    async (payload: {
+      provider: string;
+      name?: string;
+      authUrl?: string;
+      tokenUrl?: string;
+      scopes?: string;
+      clientId?: string;
+      clientSecret?: string;
+      mcpUrl?: string;
+    }) => {
+      await configureOAuthConnector(payload);
+      const provRes = await fetchOAuthProviders();
+      setOauthProviders(provRes.providers || []);
+    },
+    []
+  );
+
+  const handleDeleteOAuthConnector = useCallback(async (provider: string) => {
+    await deleteOAuthConnector(provider);
+    const [provRes, skillRes] = await Promise.all([
+      fetchOAuthProviders(),
+      fetchRegisteredSkills(),
+    ]);
+    setOauthProviders(provRes.providers || []);
+    setRegisteredSkills(skillRes.skills || []);
   }, []);
 
   const handleInstallPlugin = useCallback(
@@ -1305,6 +1358,9 @@ export default function App() {
           oauthProviders={oauthProviders}
           onConnectOAuth={handleConnectOAuth}
           onDisconnectOAuth={handleDisconnectOAuth}
+          onDiscoverWebsiteOAuth={handleDiscoverWebsiteOAuth}
+          onConfigureOAuth={handleConfigureOAuth}
+          onDeleteOAuthConnector={handleDeleteOAuthConnector}
           onInstallPlugin={handleInstallPlugin}
           onUninstallPlugin={handleUninstallPlugin}
           onTriggerConfirmTrace={(trace) => setPendingConfirmation(trace)}

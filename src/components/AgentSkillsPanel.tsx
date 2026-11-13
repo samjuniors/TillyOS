@@ -26,6 +26,9 @@ import {
   ExternalLink,
   LogOut,
   AlertTriangle,
+  Globe,
+  Copy,
+  Check,
 } from 'lucide-react';
 import {
   RegisteredSkillMetadata,
@@ -48,8 +51,24 @@ interface AgentSkillsPanelProps {
   onSignInWorkspace: () => Promise<void>;
   onSignOutWorkspace: () => Promise<void>;
   oauthProviders: OAuthProviderStatus[];
-  onConnectOAuth: (provider: 'spotify' | 'github') => Promise<void>;
-  onDisconnectOAuth: (provider: 'spotify' | 'github') => Promise<void>;
+  onConnectOAuth: (provider: string) => Promise<void>;
+  onDisconnectOAuth: (provider: string) => Promise<void>;
+  onDiscoverWebsiteOAuth: (url: string, name?: string) => Promise<{
+    callbackUrl: string;
+    connector: any;
+    discovered: { dcrSucceeded: boolean; dcrMessage?: string; authorizationEndpoint?: string };
+  }>;
+  onConfigureOAuth: (payload: {
+    provider: string;
+    name?: string;
+    authUrl?: string;
+    tokenUrl?: string;
+    scopes?: string;
+    clientId?: string;
+    clientSecret?: string;
+    mcpUrl?: string;
+  }) => Promise<void>;
+  onDeleteOAuthConnector: (provider: string) => Promise<void>;
   onInstallPlugin: (spec: CustomPluginInstallSpec) => Promise<void>;
   onUninstallPlugin: (name: string) => Promise<void>;
   onTriggerConfirmTrace?: (trace: VoiceSkillTurnTrace) => void;
@@ -150,6 +169,9 @@ export const AgentSkillsPanel: React.FC<AgentSkillsPanelProps> = ({
   oauthProviders,
   onConnectOAuth,
   onDisconnectOAuth,
+  onDiscoverWebsiteOAuth,
+  onConfigureOAuth,
+  onDeleteOAuthConnector,
   onInstallPlugin,
   onUninstallPlugin,
   onTriggerConfirmTrace,
@@ -176,6 +198,15 @@ export const AgentSkillsPanel: React.FC<AgentSkillsPanelProps> = ({
   const [isInstalling, setIsInstalling] = useState(false);
 
   const [oauthError, setOauthError] = useState<string | null>(null);
+  const [oauthNotice, setOauthNotice] = useState<string | null>(null);
+  const [remoteWebsiteUrl, setRemoteWebsiteUrl] = useState('');
+  const [remoteWebsiteName, setRemoteWebsiteName] = useState('');
+  const [isDiscovering, setIsDiscovering] = useState(false);
+  const [configuringProvider, setConfiguringProvider] = useState<string | null>(null);
+  const [credClientId, setCredClientId] = useState('');
+  const [credClientSecret, setCredClientSecret] = useState('');
+  const [isSavingOAuth, setIsSavingOAuth] = useState(false);
+  const [copiedKey, setCopiedKey] = useState<string | null>(null);
 
   const activeTrace: VoiceSkillTurnTrace | null =
     traces.length > 0 ? traces[Math.min(selectedTraceIdx, traces.length - 1)] : null;
@@ -939,15 +970,94 @@ export const AgentSkillsPanel: React.FC<AgentSkillsPanelProps> = ({
         </div>
       )}
 
-      {/* TAB 4: OAUTH SETUP (1P GOOGLE WORKSPACE + 3P SPOTIFY / GITHUB) */}
+      {/* TAB 4: REAL WEBSITE & MCP OAUTH CONNECTORS (ANTIGRAVITY / CLAUDE CODE STYLE) */}
       {activeTab === 'oauth' && (
         <div className="p-4 space-y-3 max-h-[550px] overflow-y-auto">
-          {/* 1P Google Workspace OAuth Card */}
-          <div className="p-3 rounded-xl bg-stone-950 border border-stone-800 space-y-2.5">
+          {/* Add Any Real Website / Remote MCP Server OAuth 2.1 Discovery */}
+          <div className="p-3 rounded-xl bg-stone-950 border border-amber-500/40 space-y-2">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <Globe className="w-4 h-4 text-amber-400" />
+                <span className="text-xs font-bold text-white">
+                  Connect Any Real Website / MCP Server
+                </span>
+              </div>
+              <span className="px-1.5 py-0.5 rounded bg-amber-500/15 border border-amber-500/40 text-amber-300 font-mono text-[9px]">
+                OAuth 2.1 + PKCE
+              </span>
+            </div>
+            <p className="text-[10px] text-stone-400 leading-relaxed">
+              Enter any website or MCP URL (e.g. Notion, Linear, Figma, or custom API). Probes{' '}
+              <code className="text-amber-300">.well-known/oauth-*</code> &amp; RFC 7591 Dynamic Client
+              Registration just like Antigravity / Claude Code.
+            </p>
+            <form
+              onSubmit={async (e) => {
+                e.preventDefault();
+                if (!remoteWebsiteUrl.trim()) return;
+                setOauthError(null);
+                setOauthNotice(null);
+                setIsDiscovering(true);
+                try {
+                  const res = await onDiscoverWebsiteOAuth(
+                    remoteWebsiteUrl.trim(),
+                    remoteWebsiteName.trim() || undefined
+                  );
+                  setRemoteWebsiteUrl('');
+                  setRemoteWebsiteName('');
+                  if (res.discovered.dcrSucceeded && res.connector?.provider) {
+                    setOauthNotice(
+                      `Auto-registered with ${res.connector.name}! Opening real website consent page...`
+                    );
+                    await onConnectOAuth(res.connector.provider);
+                  } else {
+                    setConfiguringProvider(res.connector.provider);
+                    setOauthNotice(
+                      res.discovered.dcrMessage ||
+                        `Discovered ${res.connector.name}. Paste Client ID below to connect.`
+                    );
+                  }
+                } catch (err: any) {
+                  setOauthError(err?.message || 'Discovery failed');
+                } finally {
+                  setIsDiscovering(false);
+                }
+              }}
+              className="space-y-1.5"
+            >
+              <div className="flex gap-1.5">
+                <input
+                  type="text"
+                  value={remoteWebsiteUrl}
+                  onChange={(e) => setRemoteWebsiteUrl(e.target.value)}
+                  placeholder="https://mcp.linear.app/mcp or https://..."
+                  className="flex-1 px-2.5 py-1.5 rounded-lg bg-stone-900 border border-stone-800 text-[11px] text-white placeholder-stone-500 focus:outline-none focus:border-amber-500 font-mono"
+                />
+                <input
+                  type="text"
+                  value={remoteWebsiteName}
+                  onChange={(e) => setRemoteWebsiteName(e.target.value)}
+                  placeholder="Label (opt)"
+                  className="w-24 px-2 py-1.5 rounded-lg bg-stone-900 border border-stone-800 text-[11px] text-white placeholder-stone-500 focus:outline-none focus:border-amber-500"
+                />
+              </div>
+              <button
+                type="submit"
+                disabled={isDiscovering || !remoteWebsiteUrl.trim()}
+                className="w-full py-1.5 px-3 rounded-lg bg-amber-500 hover:bg-amber-400 text-stone-950 font-bold text-[11px] flex items-center justify-center gap-1.5 disabled:opacity-50 cursor-pointer"
+              >
+                <Globe className="w-3 h-3" />
+                <span>{isDiscovering ? 'Discovering OAuth Endpoints...' : 'Discover & Connect Website'}</span>
+              </button>
+            </form>
+          </div>
+
+          {/* Google Workspace OAuth Card */}
+          <div className="p-3 rounded-xl bg-stone-950 border border-stone-800 space-y-2">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2">
                 <Calendar className="w-4 h-4 text-sky-400" />
-                <span className="text-xs font-bold text-white">Google Workspace OAuth</span>
+                <span className="text-xs font-bold text-white">Google Workspace</span>
               </div>
               <span
                 className={`px-2 py-0.5 rounded font-mono text-[9px] border ${
@@ -956,12 +1066,12 @@ export const AgentSkillsPanel: React.FC<AgentSkillsPanelProps> = ({
                     : 'bg-stone-900 border-stone-700 text-stone-400'
                 }`}
               >
-                {workspaceUser ? 'CONNECTED' : 'NOT LINKED'}
+                {workspaceUser ? 'CONNECTED' : 'READY'}
               </span>
             </div>
-            <p className="text-[11px] text-stone-400 leading-relaxed">
-              Authorize Matilda to read &amp; act across Google Calendar, Gmail, Tasks, and Drive
-              using your Google account (in-memory OAuth token only).
+            <p className="text-[10px] text-stone-400 leading-relaxed">
+              Connects to <code className="text-sky-300">accounts.google.com</code> for Calendar,
+              Gmail, Tasks &amp; Drive. One-click Google Sign-In works instantly without Cloud Console setup, or use your own GCP Client below.
             </p>
 
             {workspaceUser ? (
@@ -1001,76 +1111,215 @@ export const AgentSkillsPanel: React.FC<AgentSkillsPanelProps> = ({
             )}
           </div>
 
-          {/* 3P OAuth Providers (Spotify & GitHub) */}
-          {oauthProviders.map((prov) => (
-            <div
-              key={prov.provider}
-              className="p-3 rounded-xl bg-stone-950 border border-stone-800 space-y-2"
-            >
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  {prov.provider === 'spotify' ? (
-                    <Music className="w-4 h-4 text-emerald-400" />
-                  ) : (
-                    <Github className="w-4 h-4 text-purple-400" />
-                  )}
-                  <span className="text-xs font-bold text-white">{prov.name}</span>
-                </div>
-                <span
-                  className={`px-2 py-0.5 rounded font-mono text-[9px] border ${
-                    prov.connected
-                      ? 'bg-emerald-950 border-emerald-700/70 text-emerald-300'
-                      : prov.configured
-                      ? 'bg-amber-950 border-amber-700/60 text-amber-300'
-                      : 'bg-stone-900 border-stone-700 text-stone-400'
-                  }`}
-                >
-                  {prov.connected
-                    ? `LINKED (${prov.accountLabel || 'OK'})`
-                    : prov.configured
-                    ? 'READY TO LINK'
-                    : 'DRY-RUN / PUBLIC'}
-                </span>
-              </div>
-
-              <div className="p-2 rounded-lg bg-stone-900/90 border border-stone-800 text-[10px] font-mono text-stone-400 break-all">
-                <span className="text-stone-500">Callback URI: </span>
-                <span className="text-amber-300">{prov.callbackUrl}</span>
-              </div>
-
-              <div className="flex items-center gap-2">
-                {prov.connected ? (
-                  <button
-                    onClick={() => onDisconnectOAuth(prov.provider)}
-                    className="flex-1 py-1.5 rounded-lg bg-stone-900 hover:bg-stone-800 border border-stone-700 text-stone-300 text-[11px] font-medium cursor-pointer"
-                  >
-                    Disconnect {prov.provider}
-                  </button>
-                ) : (
-                  <button
-                    onClick={async () => {
-                      setOauthError(null);
-                      try {
-                        await onConnectOAuth(prov.provider);
-                      } catch (err: any) {
-                        setOauthError(err?.message || `Could not start ${prov.provider} OAuth.`);
-                      }
-                    }}
-                    className="flex-1 py-1.5 px-3 rounded-lg bg-amber-500 hover:bg-amber-400 text-stone-950 font-bold text-[11px] flex items-center justify-center gap-1.5 cursor-pointer"
-                  >
-                    <ExternalLink className="w-3 h-3" />
-                    <span>Connect {prov.provider === 'spotify' ? 'Spotify' : 'GitHub'} via OAuth</span>
-                  </button>
-                )}
-              </div>
+          {oauthNotice && (
+            <div className="p-2.5 rounded-xl bg-emerald-950/70 border border-emerald-700/70 text-[11px] text-emerald-200 leading-relaxed">
+              {oauthNotice}
             </div>
-          ))}
+          )}
 
           {oauthError && (
             <div className="p-2.5 rounded-xl bg-amber-950/70 border border-amber-700/70 text-[11px] text-amber-200 leading-relaxed">
               {oauthError}
             </div>
           )}
+
+          {/* Direct Website & MCP OAuth Connectors */}
+          {oauthProviders.map((prov) => {
+            const isExpanded = configuringProvider === prov.provider;
+            return (
+              <div
+                key={prov.provider}
+                className="p-3 rounded-xl bg-stone-950 border border-stone-800 space-y-2"
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-2 min-w-0">
+                    {prov.provider === 'spotify' ? (
+                      <Music className="w-4 h-4 text-emerald-400 shrink-0" />
+                    ) : prov.provider === 'github' ? (
+                      <Github className="w-4 h-4 text-purple-400 shrink-0" />
+                    ) : prov.provider === 'google' ? (
+                      <Calendar className="w-4 h-4 text-sky-400 shrink-0" />
+                    ) : (
+                      <Globe className="w-4 h-4 text-amber-400 shrink-0" />
+                    )}
+                    <span className="text-xs font-bold text-white truncate">{prov.name}</span>
+                  </div>
+                  <div className="flex items-center gap-1 shrink-0">
+                    <span
+                      className={`px-2 py-0.5 rounded font-mono text-[9px] border ${
+                        prov.connected
+                          ? 'bg-emerald-950 border-emerald-700/70 text-emerald-300'
+                          : prov.configured || prov.supportsDcr
+                          ? 'bg-amber-950 border-amber-700/60 text-amber-300'
+                          : 'bg-stone-900 border-stone-700 text-stone-400'
+                      }`}
+                    >
+                      {prov.connected
+                        ? `CONNECTED (${prov.accountLabel || 'OK'})`
+                        : prov.configured
+                        ? 'READY'
+                        : prov.supportsDcr
+                        ? 'AUTO-DCR'
+                        : 'SETUP CLIENT'}
+                    </span>
+                    {prov.isCustom && (
+                      <button
+                        onClick={() => onDeleteOAuthConnector(prov.provider)}
+                        className="p-1 rounded bg-rose-950/60 hover:bg-rose-900 text-rose-300 cursor-pointer"
+                        title="Remove connector"
+                      >
+                        <Trash2 className="w-3 h-3" />
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                {prov.authUrl && (
+                  <div className="text-[10px] font-mono text-stone-400 truncate">
+                    Site Auth: <span className="text-sky-300">{prov.authUrl}</span>
+                  </div>
+                )}
+
+                {prov.connected && prov.mcpTools && prov.mcpTools.length > 0 && (
+                  <div className="flex flex-wrap gap-1">
+                    {prov.mcpTools.map((t) => (
+                      <span
+                        key={t.name}
+                        className="px-1.5 py-0.5 rounded bg-emerald-950/50 border border-emerald-700/50 text-[9px] font-mono text-emerald-300"
+                      >
+                        {t.name}()
+                      </span>
+                    ))}
+                  </div>
+                )}
+
+                <div className="flex items-center gap-1.5">
+                  {prov.connected ? (
+                    <button
+                      onClick={() => onDisconnectOAuth(prov.provider)}
+                      className="flex-1 py-1.5 rounded-lg bg-stone-900 hover:bg-stone-800 border border-stone-700 text-stone-300 text-[11px] font-medium cursor-pointer"
+                    >
+                      Disconnect
+                    </button>
+                  ) : (
+                    <>
+                      <button
+                        onClick={async () => {
+                          setOauthError(null);
+                          setOauthNotice(null);
+                          try {
+                            await onConnectOAuth(prov.provider);
+                          } catch (err: any) {
+                            setConfiguringProvider(prov.provider);
+                            setOauthError(
+                              err?.message ||
+                                `Paste an OAuth Client ID for ${prov.name} below to connect directly to ${prov.authUrl}.`
+                            );
+                          }
+                        }}
+                        className="flex-1 py-1.5 px-3 rounded-lg bg-amber-500 hover:bg-amber-400 text-stone-950 font-bold text-[11px] flex items-center justify-center gap-1.5 cursor-pointer"
+                      >
+                        <ExternalLink className="w-3 h-3" />
+                        <span>Connect on {prov.name}</span>
+                      </button>
+                      <button
+                        onClick={() => {
+                          setConfiguringProvider(isExpanded ? null : prov.provider);
+                          setCredClientId('');
+                          setCredClientSecret('');
+                        }}
+                        className="px-2.5 py-1.5 rounded-lg bg-stone-900 hover:bg-stone-800 border border-stone-700 text-[10px] font-mono text-stone-300 cursor-pointer"
+                      >
+                        {isExpanded ? 'Hide' : 'Client ID'}
+                      </button>
+                    </>
+                  )}
+                </div>
+
+                {isExpanded && !prov.connected && (
+                  <div className="p-2.5 rounded-lg bg-stone-900/90 border border-stone-800 space-y-2">
+                    <div className="flex items-center justify-between gap-2 text-[10px]">
+                      <span className="text-stone-400">
+                        {prov.portalHint || 'Register this Redirect URI on the website:'}
+                      </span>
+                      {prov.portalUrl && (
+                        <a
+                          href={prov.portalUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-amber-300 hover:underline flex items-center gap-1 shrink-0"
+                        >
+                          <span>Dev Portal</span>
+                          <ExternalLink className="w-2.5 h-2.5" />
+                        </a>
+                      )}
+                    </div>
+
+                    <div className="flex items-center justify-between gap-1.5 p-1.5 rounded bg-stone-950 border border-stone-800 text-[10px] font-mono text-amber-300">
+                      <span className="truncate">{prov.callbackUrl}</span>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          navigator.clipboard?.writeText(prov.callbackUrl);
+                          setCopiedKey(prov.provider);
+                          setTimeout(() => setCopiedKey(null), 1800);
+                        }}
+                        className="p-1 rounded bg-stone-800 hover:bg-stone-700 text-stone-200 shrink-0 cursor-pointer"
+                        title="Copy Redirect URI"
+                      >
+                        {copiedKey === prov.provider ? (
+                          <Check className="w-3 h-3 text-emerald-400" />
+                        ) : (
+                          <Copy className="w-3 h-3" />
+                        )}
+                      </button>
+                    </div>
+
+                    <div className="space-y-1.5">
+                      <input
+                        type="text"
+                        value={credClientId}
+                        onChange={(e) => setCredClientId(e.target.value)}
+                        placeholder={`${prov.name} OAuth Client ID`}
+                        className="w-full px-2.5 py-1.5 rounded-lg bg-stone-950 border border-stone-800 text-[11px] text-white font-mono focus:outline-none focus:border-amber-500"
+                      />
+                      <input
+                        type="password"
+                        value={credClientSecret}
+                        onChange={(e) => setCredClientSecret(e.target.value)}
+                        placeholder="Client Secret (optional for PKCE public apps)"
+                        className="w-full px-2.5 py-1.5 rounded-lg bg-stone-950 border border-stone-800 text-[11px] text-white font-mono focus:outline-none focus:border-amber-500"
+                      />
+                      <button
+                        type="button"
+                        disabled={isSavingOAuth || !credClientId.trim()}
+                        onClick={async () => {
+                          setOauthError(null);
+                          setIsSavingOAuth(true);
+                          try {
+                            await onConfigureOAuth({
+                              provider: prov.provider,
+                              clientId: credClientId.trim(),
+                              clientSecret: credClientSecret.trim() || undefined,
+                            });
+                            setConfiguringProvider(null);
+                            await onConnectOAuth(prov.provider);
+                          } catch (err: any) {
+                            setOauthError(err?.message || 'Failed saving Client ID');
+                          } finally {
+                            setIsSavingOAuth(false);
+                          }
+                        }}
+                        className="w-full py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-stone-950 font-bold text-[11px] disabled:opacity-50 cursor-pointer"
+                      >
+                        {isSavingOAuth ? 'Launching Website...' : 'Save & Authorize on Website'}
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            );
+          })}
         </div>
       )}
     </aside>

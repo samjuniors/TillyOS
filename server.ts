@@ -16,6 +16,19 @@ import {
   SKILL_ROUTER_CONFIDENCE_THRESHOLD,
   VoiceSkillTurnTrace,
 } from './skills/router.ts';
+import {
+  getAllConnectors,
+  getConnector,
+  getSession,
+  clearSession,
+  getAllAccessTokensMap,
+  resolveEnvOrConfiguredCredentials,
+  upsertConnector,
+  deleteCustomConnector,
+  discoverAndRegisterRemoteOAuth,
+  buildAuthorizationUrl,
+  completeOAuthCallback,
+} from './skills/oauth_connectors.ts';
 
 dotenv.config();
 
@@ -1018,14 +1031,9 @@ app.post('/api/gemini-decision-1', handleDecisionEvaluate);
 app.post('/api/gemini-decision-1.0', handleDecisionEvaluate);
 
 // ============================================================================
-// 3P OAUTH SESSION STORE & PROVIDER FLOWS (Spotify / GitHub) — oauth-integration
+// REAL WEBSITE & MCP OAUTH 2.1 + PKCE + DISCOVERY (Antigravity / Claude Code)
 // Uses process.env.APP_URL and popup postMessage per AI Studio iframe guidelines
 // ============================================================================
-
-const oauthTokenStore: {
-  spotify?: { accessToken: string; accountLabel?: string; connectedAt: string };
-  github?: { accessToken: string; accountLabel?: string; connectedAt: string };
-} = {};
 
 function getAppBaseUrl(req: express.Request): string {
   const envUrl = process.env.APP_URL;
@@ -1039,209 +1047,175 @@ function getAppBaseUrl(req: express.Request): string {
 
 app.get('/api/oauth/providers', (req, res) => {
   const baseUrl = getAppBaseUrl(req);
-  const spotifyConfigured = Boolean(
-    process.env.SPOTIFY_CLIENT_ID &&
-      process.env.SPOTIFY_CLIENT_SECRET &&
-      !process.env.SPOTIFY_CLIENT_ID.startsWith('YOUR_')
-  );
-  const githubConfigured = Boolean(
-    process.env.GITHUB_CLIENT_ID &&
-      process.env.GITHUB_CLIENT_SECRET &&
-      !process.env.GITHUB_CLIENT_ID.startsWith('YOUR_')
-  );
+  const sharedBaseUrl = baseUrl.includes('ais-dev-')
+    ? baseUrl.replace('ais-dev-', 'ais-pre-')
+    : undefined;
 
-  res.json({
-    providers: [
-      {
-        provider: 'spotify',
-        name: 'Spotify Music Control',
-        connected: Boolean(oauthTokenStore.spotify?.accessToken),
-        configured: spotifyConfigured,
-        callbackUrl: `${baseUrl}/auth/spotify/callback`,
-        accountLabel: oauthTokenStore.spotify?.accountLabel,
-      },
-      {
-        provider: 'github',
-        name: 'GitHub Account',
-        connected: Boolean(oauthTokenStore.github?.accessToken),
-        configured: githubConfigured,
-        callbackUrl: `${baseUrl}/auth/github/callback`,
-        accountLabel: oauthTokenStore.github?.accountLabel,
-      },
-    ],
+  const providers = getAllConnectors().map((cfg) => {
+    const creds = resolveEnvOrConfiguredCredentials(cfg.provider);
+    const session = getSession(cfg.provider);
+    const callbackUrl =
+      cfg.provider === 'spotify' && process.env.SPOTIFY_REDIRECT_URI
+        ? process.env.SPOTIFY_REDIRECT_URI
+        : `${baseUrl}/auth/${cfg.provider}/callback`;
+
+    return {
+      provider: cfg.provider,
+      name: cfg.name,
+      description: cfg.description,
+      connected: Boolean(session?.accessToken),
+      configured: Boolean(creds.clientId),
+      hasCustomCredentials: Boolean(cfg.clientId),
+      callbackUrl,
+      sharedCallbackUrl: sharedBaseUrl ? `${sharedBaseUrl}/auth/${cfg.provider}/callback` : undefined,
+      accountLabel: session?.accountLabel,
+      authUrl: cfg.authUrl,
+      tokenUrl: cfg.tokenUrl,
+      scopes: cfg.scopes,
+      mcpUrl: cfg.mcpUrl,
+      mcpTools: session?.mcpTools,
+      supportsDcr: Boolean(cfg.supportsDcr || cfg.registrationEndpoint),
+      portalUrl: cfg.portalUrl,
+      portalHint: cfg.portalHint,
+      isCustom: !cfg.isBuiltIn,
+    };
   });
+
+  res.json({ providers });
 });
 
-app.get('/api/oauth/:provider/url', (req, res) => {
-  const provider = req.params.provider as 'spotify' | 'github';
-  const baseUrl = getAppBaseUrl(req);
-
-  if (provider === 'spotify') {
-    const clientId = process.env.SPOTIFY_CLIENT_ID;
-    const redirectUri = process.env.SPOTIFY_REDIRECT_URI || `${baseUrl}/auth/spotify/callback`;
-    if (!clientId || clientId.startsWith('YOUR_')) {
-      return res.status(400).json({
-        error: `Spotify OAuth app not configured yet. Add SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET in Settings > Secrets with callback URL: ${baseUrl}/auth/spotify/callback`,
-        callbackUrl: redirectUri,
-      });
+app.post('/api/oauth/discover', async (req, res) => {
+  try {
+    const { url, name } = req.body || {};
+    if (!url || typeof url !== 'string') {
+      return res.status(400).json({ error: 'Website or MCP Server URL is required.' });
     }
-    const params = new URLSearchParams({
-      client_id: clientId,
-      response_type: 'code',
-      redirect_uri: redirectUri,
-      scope: 'user-modify-playback-state user-read-playback-state user-read-currently-playing',
-      show_dialog: 'true',
-    });
-    return res.json({
-      url: `https://accounts.spotify.com/authorize?${params.toString()}`,
-      callbackUrl: redirectUri,
-    });
-  }
+    const baseUrl = getAppBaseUrl(req);
+    const hostSlug = new URL(url.startsWith('http') ? url : `https://${url}`).hostname
+      .replace(/^mcp\.|^api\.|^www\./i, '')
+      .split('.')[0] || 'custom_site';
+    const providerId = (name || hostSlug).toLowerCase().replace(/[^a-z0-9_]+/g, '_');
+    const redirectUri = `${baseUrl}/auth/${providerId}/callback`;
 
-  if (provider === 'github') {
-    const clientId = process.env.GITHUB_CLIENT_ID;
-    const redirectUri = `${baseUrl}/auth/github/callback`;
-    if (!clientId || clientId.startsWith('YOUR_')) {
-      return res.status(400).json({
-        error: `GitHub OAuth app not configured yet. Add GITHUB_CLIENT_ID and GITHUB_CLIENT_SECRET in Settings > Secrets with callback URL: ${redirectUri}`,
-        callbackUrl: redirectUri,
-      });
-    }
-    const params = new URLSearchParams({
-      client_id: clientId,
-      redirect_uri: redirectUri,
-      scope: 'repo read:user',
-    });
-    return res.json({
-      url: `https://github.com/login/oauth/authorize?${params.toString()}`,
+    const result = await discoverAndRegisterRemoteOAuth(url, redirectUri, name);
+    res.json({
+      success: true,
       callbackUrl: redirectUri,
+      ...result,
     });
+  } catch (err: any) {
+    res.status(400).json({ error: err?.message || 'Failed to discover OAuth endpoints for website' });
   }
-
-  res.status(404).json({ error: 'Unknown OAuth provider' });
 });
 
-app.get(['/auth/spotify/callback', '/auth/spotify/callback/'], async (req, res) => {
+app.post('/api/oauth/configure', (req, res) => {
+  try {
+    const body = req.body || {};
+    if (!body.provider) {
+      return res.status(400).json({ error: 'Connector "provider" key is required.' });
+    }
+    const connector = upsertConnector(body);
+    res.json({
+      success: true,
+      connector: {
+        ...connector,
+        clientSecret: connector.clientSecret ? '***' : undefined,
+      },
+    });
+  } catch (err: any) {
+    res.status(400).json({ error: err?.message || 'Failed to configure OAuth connector' });
+  }
+});
+
+app.delete('/api/oauth/:provider', (req, res) => {
+  const provider = req.params.provider;
+  const deleted = deleteCustomConnector(provider);
+  skillRegistry.unregisterConnectorSkill(provider);
+  if (!deleted) {
+    return res.status(400).json({ error: 'Cannot delete built-in provider or provider not found.' });
+  }
+  res.json({ success: true });
+});
+
+app.get('/api/oauth/:provider/url', async (req, res) => {
+  try {
+    const provider = req.params.provider;
+    const baseUrl = getAppBaseUrl(req);
+    const redirectUri =
+      provider === 'spotify' && process.env.SPOTIFY_REDIRECT_URI
+        ? process.env.SPOTIFY_REDIRECT_URI
+        : `${baseUrl}/auth/${provider}/callback`;
+
+    const result = await buildAuthorizationUrl(provider, redirectUri);
+    res.json(result);
+  } catch (err: any) {
+    const baseUrl = getAppBaseUrl(req);
+    res.status(400).json({
+      error: err?.message || 'OAuth connector not configured',
+      callbackUrl: `${baseUrl}/auth/${req.params.provider}/callback`,
+    });
+  }
+});
+
+app.get(['/auth/:provider/callback', '/auth/:provider/callback/'], async (req, res) => {
+  const provider = req.params.provider;
   const code = String(req.query.code || '');
+  const state = req.query.state ? String(req.query.state) : undefined;
+  const oauthError = req.query.error ? String(req.query.error_description || req.query.error) : '';
+
+  if (oauthError) {
+    return res
+      .status(400)
+      .send(`<html><body style="background:#0c0a09;color:#fca5a5;font-family:sans-serif;padding:24px;"><h3>Authorization Cancelled / Error</h3><p>${oauthError}</p></body></html>`);
+  }
+
   const baseUrl = getAppBaseUrl(req);
-  const redirectUri = process.env.SPOTIFY_REDIRECT_URI || `${baseUrl}/auth/spotify/callback`;
+  const fallbackRedirect =
+    provider === 'spotify' && process.env.SPOTIFY_REDIRECT_URI
+      ? process.env.SPOTIFY_REDIRECT_URI
+      : `${baseUrl}/auth/${provider}/callback`;
 
   try {
-    const clientId = process.env.SPOTIFY_CLIENT_ID || '';
-    const clientSecret = process.env.SPOTIFY_CLIENT_SECRET || '';
-    const basicAuth = Buffer.from(`${clientId}:${clientSecret}`).toString('base64');
-
-    const tokenRes = await fetch('https://accounts.spotify.com/api/token', {
-      method: 'POST',
-      headers: {
-        Authorization: `Basic ${basicAuth}`,
-        'Content-Type': 'application/x-www-form-urlencoded',
-      },
-      body: new URLSearchParams({
-        grant_type: 'authorization_code',
-        code,
-        redirect_uri: redirectUri,
-      }).toString(),
-    });
-    const tokenData: any = await tokenRes.json();
-    if (!tokenData.access_token) {
-      throw new Error(tokenData.error_description || 'Spotify token exchange failed');
+    const session = await completeOAuthCallback(provider, code, state, fallbackRedirect);
+    const cfg = getConnector(provider);
+    if (cfg) {
+      skillRegistry.registerMcpConnectorSkill(
+        cfg,
+        session,
+        () => getSession(provider)?.accessToken || null
+      );
     }
 
-    let accountLabel = 'Spotify User';
-    try {
-      const meRes = await fetch('https://api.spotify.com/v1/me', {
-        headers: { Authorization: `Bearer ${tokenData.access_token}` },
-      });
-      if (meRes.ok) {
-        const me: any = await meRes.json();
-        accountLabel = me.display_name || me.id || 'Spotify User';
-      }
-    } catch {}
-
-    oauthTokenStore.spotify = {
-      accessToken: tokenData.access_token,
-      accountLabel,
-      connectedAt: new Date().toISOString(),
+    const messagePayload = {
+      type: 'OAUTH_AUTH_SUCCESS',
+      provider,
+      accountLabel: session.accountLabel,
+      mcpToolsCount: session.mcpTools?.length || 0,
+      ...(provider === 'google' ? { accessToken: session.accessToken } : {}),
     };
 
     res.send(`<html><body style="background:#0c0a09;color:#e7e5e4;font-family:sans-serif;padding:24px;">
       <script>
         if (window.opener) {
-          window.opener.postMessage({ type: 'OAUTH_AUTH_SUCCESS', provider: 'spotify', accountLabel: ${JSON.stringify(accountLabel)} }, '*');
+          window.opener.postMessage(${JSON.stringify(messagePayload)}, '*');
           window.close();
         } else {
           window.location.href = '/';
         }
       </script>
-      <p>Spotify OAuth connected cleanly! You may close this window.</p>
+      <p>Connected to ${cfg?.name || provider} cleanly! You may close this window.</p>
     </body></html>`);
   } catch (err: any) {
-    res.status(400).send(`<html><body><p>Spotify OAuth failed: ${err?.message || 'Error'}</p></body></html>`);
-  }
-});
-
-app.get(['/auth/github/callback', '/auth/github/callback/'], async (req, res) => {
-  const code = String(req.query.code || '');
-  const baseUrl = getAppBaseUrl(req);
-  const redirectUri = `${baseUrl}/auth/github/callback`;
-
-  try {
-    const tokenRes = await fetch('https://github.com/login/oauth/access_token', {
-      method: 'POST',
-      headers: {
-        Accept: 'application/json',
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        client_id: process.env.GITHUB_CLIENT_ID || '',
-        client_secret: process.env.GITHUB_CLIENT_SECRET || '',
-        code,
-        redirect_uri: redirectUri,
-      }),
-    });
-    const tokenData: any = await tokenRes.json();
-    if (!tokenData.access_token) {
-      throw new Error(tokenData.error_description || 'GitHub token exchange failed');
-    }
-
-    let accountLabel = 'GitHub User';
-    try {
-      const meRes = await fetch('https://api.github.com/user', {
-        headers: { Authorization: `Bearer ${tokenData.access_token}`, 'User-Agent': 'sofia-voice-agent' },
-      });
-      if (meRes.ok) {
-        const me: any = await meRes.json();
-        accountLabel = me.login || me.name || 'GitHub User';
-      }
-    } catch {}
-
-    oauthTokenStore.github = {
-      accessToken: tokenData.access_token,
-      accountLabel,
-      connectedAt: new Date().toISOString(),
-    };
-
-    res.send(`<html><body style="background:#0c0a09;color:#e7e5e4;font-family:sans-serif;padding:24px;">
-      <script>
-        if (window.opener) {
-          window.opener.postMessage({ type: 'OAUTH_AUTH_SUCCESS', provider: 'github', accountLabel: ${JSON.stringify(accountLabel)} }, '*');
-          window.close();
-        } else {
-          window.location.href = '/';
-        }
-      </script>
-      <p>GitHub OAuth connected cleanly! You may close this window.</p>
-    </body></html>`);
-  } catch (err: any) {
-    res.status(400).send(`<html><body><p>GitHub OAuth failed: ${err?.message || 'Error'}</p></body></html>`);
+    res
+      .status(400)
+      .send(`<html><body style="background:#0c0a09;color:#fca5a5;font-family:sans-serif;padding:24px;"><h3>OAuth Failed</h3><p>${err?.message || 'Token exchange error'}</p></body></html>`);
   }
 });
 
 app.post('/api/oauth/:provider/disconnect', (req, res) => {
   const provider = req.params.provider;
-  if (provider === 'spotify') delete oauthTokenStore.spotify;
-  if (provider === 'github') delete oauthTokenStore.github;
+  clearSession(provider);
+  skillRegistry.unregisterConnectorSkill(provider);
   res.json({ success: true });
 });
 
@@ -1312,9 +1286,9 @@ app.post('/api/skills/route-and-execute', async (req, res) => {
     }
 
     const authHeader = req.headers.authorization || '';
-    const workspaceAccessToken = authHeader.startsWith('Bearer ')
-      ? authHeader.slice(7).trim()
-      : null;
+    const bearerToken = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : null;
+    const directGoogleSession = getSession('google')?.accessToken || null;
+    const workspaceAccessToken = bearerToken || directGoogleSession;
 
     const threshold =
       typeof confidenceThreshold === 'number'
@@ -1328,10 +1302,7 @@ app.post('/api/skills/route-and-execute', async (req, res) => {
         activeLanguage: activeLanguage || 'English',
         workspaceAccessToken,
         confirmedAction: Boolean(confirmedAction),
-        oauthTokens: {
-          spotify: oauthTokenStore.spotify?.accessToken || null,
-          github: oauthTokenStore.github?.accessToken || null,
-        },
+        oauthTokens: getAllAccessTokensMap(),
       },
     });
 
@@ -1876,11 +1847,8 @@ wss.on('connection', async (clientWs: WebSocket) => {
         threshold: SKILL_ROUTER_CONFIDENCE_THRESHOLD,
         context: {
           activeLanguage: sessionLanguage || 'English',
-          workspaceAccessToken: overrideToken ?? sessionWorkspaceToken,
-          oauthTokens: {
-            spotify: oauthTokenStore.spotify?.accessToken || null,
-            github: oauthTokenStore.github?.accessToken || null,
-          },
+          workspaceAccessToken: overrideToken ?? sessionWorkspaceToken ?? getSession('google')?.accessToken ?? null,
+          oauthTokens: getAllAccessTokensMap(),
           onFillerTriggered: (fillerPhrase: string) => {
             if (clientWs.readyState === WebSocket.OPEN) {
               clientWs.send(
@@ -2035,11 +2003,8 @@ ${activeSkillList}
                       const execRes = await skillRegistry.executeTool(toolName, toolArgs, {
                         userInput: JSON.stringify(toolArgs),
                         activeLanguage: sessionLanguage || 'English',
-                        workspaceAccessToken: sessionWorkspaceToken,
-                        oauthTokens: {
-                          spotify: oauthTokenStore.spotify?.accessToken || null,
-                          github: oauthTokenStore.github?.accessToken || null,
-                        },
+                        workspaceAccessToken: sessionWorkspaceToken ?? getSession('google')?.accessToken ?? null,
+                        oauthTokens: getAllAccessTokensMap(),
                         onFillerTriggered: (fillerPhrase: string) => {
                           spokenFiller = fillerPhrase;
                           if (clientWs.readyState === WebSocket.OPEN) {

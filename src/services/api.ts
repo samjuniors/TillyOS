@@ -144,11 +144,62 @@ export async function fetchOAuthProviders(): Promise<{
   return res.json();
 }
 
-export async function getOAuthStartUrl(provider: 'spotify' | 'github'): Promise<{
+export async function discoverOAuthWebsite(
+  url: string,
+  name?: string
+): Promise<{
+  success: boolean;
+  callbackUrl: string;
+  connector: any;
+  discovered: {
+    issuer?: string;
+    authorizationEndpoint?: string;
+    tokenEndpoint?: string;
+    registrationEndpoint?: string;
+    dcrSucceeded: boolean;
+    dcrMessage?: string;
+  };
+}> {
+  const res = await fetch('/api/oauth/discover', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ url, name }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error || `Failed to discover OAuth metadata (${res.status})`);
+  }
+  return res.json();
+}
+
+export async function configureOAuthConnector(payload: {
+  provider: string;
+  name?: string;
+  authUrl?: string;
+  tokenUrl?: string;
+  scopes?: string;
+  clientId?: string;
+  clientSecret?: string;
+  mcpUrl?: string;
+}): Promise<{ success: boolean }> {
+  const res = await fetch('/api/oauth/configure', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error || `Failed to save OAuth configuration (${res.status})`);
+  }
+  return res.json();
+}
+
+export async function getOAuthStartUrl(provider: string): Promise<{
   url: string;
   callbackUrl: string;
+  dcrAutoRegistered?: boolean;
 }> {
-  const res = await fetch(`/api/oauth/${provider}/url`);
+  const res = await fetch(`/api/oauth/${encodeURIComponent(provider)}/url`);
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
     throw new Error(err.error || `Failed to build OAuth URL (${res.status})`);
@@ -156,8 +207,12 @@ export async function getOAuthStartUrl(provider: 'spotify' | 'github'): Promise<
   return res.json();
 }
 
-export async function disconnectOAuthProvider(provider: 'spotify' | 'github'): Promise<void> {
-  await fetch(`/api/oauth/${provider}/disconnect`, { method: 'POST' });
+export async function disconnectOAuthProvider(provider: string): Promise<void> {
+  await fetch(`/api/oauth/${encodeURIComponent(provider)}/disconnect`, { method: 'POST' });
+}
+
+export async function deleteOAuthConnector(provider: string): Promise<void> {
+  await fetch(`/api/oauth/${encodeURIComponent(provider)}`, { method: 'DELETE' });
 }
 
 export async function evaluateWithDecisionEngine(

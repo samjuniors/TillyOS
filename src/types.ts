@@ -325,11 +325,22 @@ export interface CustomPluginInstallSpec {
 }
 
 export interface OAuthProviderStatus {
-  provider: 'spotify' | 'github';
+  provider: string;
   name: string;
+  description?: string;
   connected: boolean;
   configured: boolean;
+  hasCustomCredentials?: boolean;
   callbackUrl: string;
   sharedCallbackUrl?: string;
   accountLabel?: string;
+  authUrl?: string;
+  tokenUrl?: string;
+  scopes?: string;
+  mcpUrl?: string;
+  mcpTools?: Array<{ name: string; description?: string }>;
+  supportsDcr?: boolean;
+  portalUrl?: string;
+  portalHint?: string;
+  isCustom?: boolean;
 }

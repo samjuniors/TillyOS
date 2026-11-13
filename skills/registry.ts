@@ -8,6 +8,11 @@ import spotifyControlSkill from './spotify_control.ts';
 import googleWorkspaceSkill from './google_workspace.ts';
 import githubOpsSkill from './github_ops.ts';
 import productivityAgentSkill from './productivity_agent.ts';
+import {
+  callMcpToolWithToken,
+  ConnectedOAuthSession,
+  OAuthConnectorConfig,
+} from './oauth_connectors.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -184,6 +189,119 @@ class DynamicCustomSkill extends BaseSkill {
   }
 }
 
+class DynamicMcpConnectorSkill extends BaseSkill {
+  readonly name: string;
+  readonly description: string;
+  readonly decision_criteria: string;
+  readonly filler_phrase: string;
+  readonly isCustom = true;
+  readonly oauthProvider = 'none' as const;
+  readonly tool_declarations: FunctionDeclaration[];
+  private connector: OAuthConnectorConfig;
+  private getAccessToken: () => string | null;
+
+  constructor(
+    connector: OAuthConnectorConfig,
+    session: ConnectedOAuthSession,
+    getAccessToken: () => string | null
+  ) {
+    super();
+    this.connector = connector;
+    this.getAccessToken = getAccessToken;
+    this.name = `connector_${connector.provider}`;
+    this.description = `${connector.name} live OAuth-connected plugin.`;
+    this.decision_criteria = `User asks to read, search, or perform an action in ${connector.name} (${connector.description}).`;
+    this.filler_phrase = `Checking ${connector.name} for you now...`;
+
+    if (session.mcpTools && session.mcpTools.length > 0) {
+      this.tool_declarations = session.mcpTools.slice(0, 8).map((t) => ({
+        name: `${connector.provider}_${t.name}`,
+        description: t.description || `${connector.name} MCP tool ${t.name}`,
+        parameters: (t.inputSchema as any) || {
+          type: Type.OBJECT,
+          properties: {
+            query: { type: Type.STRING, description: 'Natural language query or input.' },
+          },
+        },
+      }));
+    } else {
+      this.tool_declarations = [
+        {
+          name: `${connector.provider}_query`,
+          description: `Send an authenticated request to ${connector.name}.`,
+          parameters: {
+            type: Type.OBJECT,
+            properties: {
+              query: { type: Type.STRING, description: 'Query or command for the connected site.' },
+            },
+            required: ['query'],
+          },
+        },
+      ];
+    }
+  }
+
+  async execute(
+    toolName: string,
+    args: Record<string, any>,
+    context?: SkillExecutionContext
+  ): Promise<SkillExecutionResult> {
+    const startTime = Date.now();
+    const token = this.getAccessToken();
+    if (!token) {
+      return {
+        skillName: this.name,
+        toolName,
+        args: args || {},
+        success: false,
+        voiceSummary: `Please connect ${this.connector.name} via OAuth first in the OAuth tab.`,
+        executionTimeMs: Date.now() - startTime,
+        mode: 'oauth_api',
+      };
+    }
+
+    if (this.connector.mcpUrl) {
+      const mcpToolName = toolName.startsWith(`${this.connector.provider}_`)
+        ? toolName.slice(this.connector.provider.length + 1)
+        : toolName;
+      try {
+        const res = await callMcpToolWithToken(this.connector.mcpUrl, token, mcpToolName, args || {});
+        return {
+          skillName: this.name,
+          toolName,
+          args: args || {},
+          success: res.ok,
+          voiceSummary: res.text.slice(0, 320),
+          data: { response: res.raw },
+          executionTimeMs: Date.now() - startTime,
+          mode: 'oauth_api',
+        };
+      } catch (err: any) {
+        return {
+          skillName: this.name,
+          toolName,
+          args: args || {},
+          success: false,
+          voiceSummary: `${this.connector.name} request failed: ${err?.message || 'error'}`,
+          executionTimeMs: Date.now() - startTime,
+          mode: 'oauth_api',
+        };
+      }
+    }
+
+    return {
+      skillName: this.name,
+      toolName,
+      args: args || {},
+      success: true,
+      voiceSummary: `${this.connector.name} is connected via OAuth (${this.connector.authUrl}). Input "${args?.query || context?.userInput || ''}" received.`,
+      data: { provider: this.connector.provider, connected: true },
+      executionTimeMs: Date.now() - startTime,
+      mode: 'oauth_api',
+    };
+  }
+}
+
 /**
  * Central SkillRegistry that automatically discovers and registers all built-in,
  * prebuilt, and user-installed custom plugins in `/skills`.
@@ -324,6 +442,27 @@ export default new Custom_${cleanName}Skill();
     return true;
   }
 
+  public registerMcpConnectorSkill(
+    connector: OAuthConnectorConfig,
+    session: ConnectedOAuthSession,
+    getAccessToken: () => string | null
+  ): void {
+    // Spotify, GitHub, and Google already have dedicated built-in skills
+    if (['spotify', 'github', 'google'].includes(connector.provider)) return;
+    const skill = new DynamicMcpConnectorSkill(connector, session, getAccessToken);
+    this.register(skill);
+  }
+
+  public unregisterConnectorSkill(provider: string): void {
+    const skillName = `connector_${provider}`;
+    const skill = this.skills.get(skillName);
+    if (!skill) return;
+    for (const td of skill.tool_declarations) {
+      if (td.name) this.toolToSkillMap.delete(td.name);
+    }
+    this.skills.delete(skillName);
+  }
+
   public async autoDiscoverSkills(): Promise<void> {
     if (this.initialized) return;
     this.initialized = true;
@@ -335,6 +474,8 @@ export default new Custom_${cleanName}Skill();
       'registry.js',
       'router.ts',
       'router.js',
+      'oauth_connectors.ts',
+      'oauth_connectors.js',
       'web_search.ts',
       'spotify_control.ts',
       'google_workspace.ts',
