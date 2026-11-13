@@ -8,6 +8,7 @@ import spotifyControlSkill from './spotify_control.ts';
 import googleWorkspaceSkill from './google_workspace.ts';
 import githubOpsSkill from './github_ops.ts';
 import productivityAgentSkill from './productivity_agent.ts';
+import computerUseSkill from './computer_use.ts';
 import {
   callMcpToolWithToken,
   ConnectedOAuthSession,
@@ -319,6 +320,7 @@ export class SkillRegistry {
     this.register(googleWorkspaceSkill);
     this.register(githubOpsSkill);
     this.register(productivityAgentSkill);
+    this.register(computerUseSkill);
     this.loadPersistedCustomPlugins();
   }
 
@@ -481,6 +483,8 @@ export default new Custom_${cleanName}Skill();
       'google_workspace.ts',
       'github_ops.ts',
       'productivity_agent.ts',
+      'computer_use.ts',
+      'computer_use_engine.ts',
     ]);
 
     try {

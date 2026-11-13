@@ -29,6 +29,7 @@ import {
   Globe,
   Copy,
   Check,
+  Monitor,
 } from 'lucide-react';
 import {
   RegisteredSkillMetadata,
@@ -111,6 +112,12 @@ const QUICK_SKILL_TESTS = [
     utterance: 'What time is it right now and calculate 128 * 16?',
     badge: 'productivity',
   },
+  {
+    label: 'Computer Use',
+    icon: Monitor,
+    utterance: 'Go to https://en.wikipedia.org and inspect what is on screen',
+    badge: 'computer_use',
+  },
 ];
 
 function GoogleGIcon() {
@@ -148,6 +155,8 @@ function getSkillIcon(name: string) {
       return <StickyNote className="w-4 h-4 text-amber-300" />;
     case 'web_search':
       return <Search className="w-4 h-4 text-amber-400" />;
+    case 'computer_use':
+      return <Monitor className="w-4 h-4 text-amber-400" />;
     default:
       return <Puzzle className="w-4 h-4 text-emerald-300" />;
   }

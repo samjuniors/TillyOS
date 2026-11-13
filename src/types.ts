@@ -54,6 +54,7 @@ export type ActionType =
   | 'open_memories'
   | 'open_advice'
   | 'open_decision_engine'
+  | 'open_computer_use'
   | 'toggle_theme';
 
 export interface UIAction {
@@ -344,3 +345,154 @@ export interface OAuthProviderStatus {
   portalHint?: string;
   isCustom?: boolean;
 }
+
+// ============================================================================
+// Hybrid Computer Use Studio Types (Desktop Bridge + Cloud Browser Sandbox)
+// ============================================================================
+
+export type ComputerTargetMode = 'hybrid' | 'desktop_bridge' | 'browser_sandbox' | 'screen_share';
+
+export type ComputerSessionStatus =
+  | 'idle'
+  | 'running'
+  | 'awaiting_confirmation'
+  | 'completed'
+  | 'aborted'
+  | 'error';
+
+export type ComputerActionType =
+  | 'click_at'
+  | 'double_click_at'
+  | 'right_click_at'
+  | 'drag_and_drop'
+  | 'move_cursor'
+  | 'scroll_at'
+  | 'type_text'
+  | 'press_key'
+  | 'hotkey'
+  | 'open_app'
+  | 'open_url'
+  | 'wait_seconds'
+  | 'complete_task';
+
+export interface ComputerActionStep {
+  stepIndex: number;
+  timestamp: string;
+  targetUsed: 'desktop_bridge' | 'browser_sandbox' | 'screen_share';
+  action: ComputerActionType;
+  args: Record<string, any>;
+  rationale: string;
+  riskTier: 'safe' | 'risky';
+  riskReason?: string;
+  approvalState: 'auto_approved' | 'pending' | 'user_approved' | 'rejected';
+  status: 'planned' | 'executed' | 'blocked' | 'failed';
+  message: string;
+  latencyMs: number;
+  normalizedCoords?: {
+    x?: number;
+    y?: number;
+    endX?: number;
+    endY?: number;
+  };
+  pixelCoords?: {
+    pixelX?: number;
+    pixelY?: number;
+    endPixelX?: number;
+    endPixelY?: number;
+  };
+}
+
+export interface BridgeConnectionState {
+  connected: boolean;
+  os?: string;
+  hostname?: string;
+  logicalWidth?: number;
+  logicalHeight?: number;
+  physicalWidth?: number;
+  physicalHeight?: number;
+  connectedAt?: string;
+  lastHeartbeatAt?: string;
+  activeToken?: string | null;
+}
+
+export interface BrowserSandboxState {
+  ready: boolean;
+  launching: boolean;
+  currentUrl: string;
+  pageTitle: string;
+  viewportWidth: number;
+  viewportHeight: number;
+  error?: string | null;
+}
+
+export interface ComputerFrameState {
+  imageBase64: string;
+  mimeType: string;
+  source: 'desktop_bridge' | 'browser_sandbox' | 'screen_share';
+  width: number;
+  height: number;
+  timestamp: string;
+  urlOrApp?: string;
+}
+
+export interface PendingRiskyConfirmation {
+  confirmationId: string;
+  sessionId: string;
+  stepIndex: number;
+  targetUsed: 'desktop_bridge' | 'browser_sandbox' | 'screen_share';
+  action: ComputerActionType;
+  args: Record<string, any>;
+  rationale: string;
+  riskReason: string;
+  normalizedCoords?: {
+    x?: number;
+    y?: number;
+    endX?: number;
+    endY?: number;
+  };
+  previewImageBase64?: string;
+  previewMimeType?: string;
+}
+
+export interface ComputerUseSessionState {
+  sessionId: string;
+  goal: string;
+  targetMode: ComputerTargetMode;
+  status: ComputerSessionStatus;
+  maxSteps: number;
+  currentStep: number;
+  summary: string;
+  error?: string | null;
+  startedAt: string;
+  updatedAt: string;
+  steps: ComputerActionStep[];
+  pendingConfirmation: PendingRiskyConfirmation | null;
+  lastCoords?: {
+    action: ComputerActionType;
+    x?: number;
+    y?: number;
+    endX?: number;
+    endY?: number;
+    timestamp: string;
+  } | null;
+}
+
+export interface ComputerUsePublicState {
+  targetMode: ComputerTargetMode;
+  bridge: BridgeConnectionState;
+  sandbox: BrowserSandboxState;
+  latestFrame: ComputerFrameState | null;
+  session: ComputerUseSessionState;
+}
+
+export interface ComputerBridgePairingInfo {
+  token: string;
+  expiresInSeconds: number;
+  wsUrl: string;
+  scriptDownloadUrl: string;
+  commands: {
+    unix: string;
+    windows: string;
+  };
+}
+

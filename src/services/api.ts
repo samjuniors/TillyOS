@@ -12,6 +12,11 @@ import {
   VoiceSkillTurnTrace,
   CustomPluginInstallSpec,
   OAuthProviderStatus,
+  ComputerUsePublicState,
+  ComputerTargetMode,
+  ComputerBridgePairingInfo,
+  ComputerFrameState,
+  ComputerUseSessionState,
 } from '../types';
 
 export interface ChatResponse {
@@ -343,3 +348,116 @@ export async function checkServerHealth(): Promise<{ status: string; hasApiKey: 
     return { status: 'offline', hasApiKey: false };
   }
 }
+
+export async function fetchComputerUseState(): Promise<ComputerUsePublicState> {
+  const res = await fetch('/api/computer-use/state');
+  if (!res.ok) throw new Error(`Failed to fetch Computer Use state (${res.status})`);
+  return res.json();
+}
+
+export async function setComputerTargetMode(targetMode: ComputerTargetMode): Promise<ComputerUsePublicState> {
+  const res = await fetch('/api/computer-use/target', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ targetMode }),
+  });
+  if (!res.ok) throw new Error('Failed to switch computer target mode');
+  return res.json();
+}
+
+export async function createBridgePairingToken(): Promise<ComputerBridgePairingInfo> {
+  const res = await fetch('/api/computer-use/pair', { method: 'POST' });
+  if (!res.ok) throw new Error('Failed to create bridge pairing token');
+  return res.json();
+}
+
+export async function captureComputerFrame(
+  source?: 'desktop_bridge' | 'browser_sandbox' | 'screen_share'
+): Promise<{ frame: ComputerFrameState; state: ComputerUsePublicState }> {
+  const res = await fetch('/api/computer-use/capture', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ source }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error || `Capture failed (${res.status})`);
+  }
+  return res.json();
+}
+
+export async function sendScreenShareFrame(payload: {
+  imageBase64: string;
+  mimeType?: string;
+  width?: number;
+  height?: number;
+  label?: string;
+}): Promise<void> {
+  await fetch('/api/computer-use/screen-share-frame', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function navigateSandboxUrl(
+  url: string
+): Promise<{ frame: ComputerFrameState; state: ComputerUsePublicState }> {
+  const res = await fetch('/api/computer-use/sandbox/navigate', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ url }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error || `Navigation failed (${res.status})`);
+  }
+  return res.json();
+}
+
+export async function runComputerTask(params: {
+  goal: string;
+  targetMode?: ComputerTargetMode;
+  startUrl?: string;
+  maxSteps?: number;
+}): Promise<{ session: ComputerUseSessionState; state: ComputerUsePublicState }> {
+  const res = await fetch('/api/computer-use/run', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(params),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error || `Computer task failed (${res.status})`);
+  }
+  return res.json();
+}
+
+export async function confirmComputerAction(
+  confirmationId: string,
+  approved: boolean
+): Promise<{ session: ComputerUseSessionState; state: ComputerUsePublicState }> {
+  const res = await fetch('/api/computer-use/confirm', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ confirmationId, approved }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error || `Confirmation failed (${res.status})`);
+  }
+  return res.json();
+}
+
+export async function stopComputerTask(
+  reason?: string
+): Promise<{ session: ComputerUseSessionState; state: ComputerUsePublicState }> {
+  const res = await fetch('/api/computer-use/stop', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ reason }),
+  });
+  if (!res.ok) throw new Error('Failed to stop computer task');
+  return res.json();
+}
+

@@ -29,6 +29,7 @@ import {
   buildAuthorizationUrl,
   completeOAuthCallback,
 } from './skills/oauth_connectors.ts';
+import { computerUseCoordinator, ComputerTargetMode } from './skills/computer_use_engine.ts';
 
 dotenv.config();
 
@@ -1313,6 +1314,132 @@ app.post('/api/skills/route-and-execute', async (req, res) => {
   }
 });
 
+// ============================================================================
+// HYBRID COMPUTER USE STUDIO API (Desktop Bridge + Cloud Browser Sandbox)
+// ============================================================================
+
+app.get('/api/computer-use/state', (_req, res) => {
+  res.json(computerUseCoordinator.getPublicState());
+});
+
+app.post('/api/computer-use/target', (req, res) => {
+  const mode = req.body?.targetMode as ComputerTargetMode;
+  if (!['hybrid', 'desktop_bridge', 'browser_sandbox', 'screen_share'].includes(mode)) {
+    return res.status(400).json({ error: 'Invalid targetMode.' });
+  }
+  res.json(computerUseCoordinator.setTargetMode(mode));
+});
+
+app.post('/api/computer-use/pair', (req, res) => {
+  const baseUrl = getAppBaseUrl(req);
+  const wsBase = baseUrl.replace(/^https:\/\//i, 'wss://').replace(/^http:\/\//i, 'ws://');
+  const wsUrl = `${wsBase}/api/computer-bridge-ws`;
+  const { token, expiresInSeconds } = computerUseCoordinator.createPairingToken();
+  const scriptDownloadUrl = `${baseUrl}/api/computer-use/bridge-script?token=${encodeURIComponent(token)}`;
+
+  res.json({
+    token,
+    expiresInSeconds,
+    wsUrl,
+    scriptDownloadUrl,
+    commands: {
+      unix: `pip install -q websockets mss pyautogui pillow && curl -fsSL "${scriptDownloadUrl}" -o matilda_bridge.py && python3 matilda_bridge.py`,
+      windows: `pip install -q websockets mss pyautogui pillow && curl.exe -fsSL "${scriptDownloadUrl}" -o matilda_bridge.py && python matilda_bridge.py`,
+    },
+  });
+});
+
+app.get('/api/computer-use/bridge-script', (req, res) => {
+  try {
+    const baseUrl = getAppBaseUrl(req);
+    const wsBase = baseUrl.replace(/^https:\/\//i, 'wss://').replace(/^http:\/\//i, 'ws://');
+    const wsUrl = `${wsBase}/api/computer-bridge-ws`;
+    const token = String(req.query.token || '').trim() || computerUseCoordinator.createPairingToken().token;
+    const script = computerUseCoordinator.getBridgeScriptWithConfig(wsUrl, token);
+    res.setHeader('Content-Type', 'text/x-python; charset=utf-8');
+    res.setHeader('Content-Disposition', 'attachment; filename="matilda_desktop_bridge.py"');
+    res.send(script);
+  } catch (err: any) {
+    res.status(500).json({ error: err?.message || 'Failed to generate Desktop Bridge script.' });
+  }
+});
+
+app.post('/api/computer-use/capture', async (req, res) => {
+  try {
+    const source = req.body?.source as 'desktop_bridge' | 'browser_sandbox' | 'screen_share' | undefined;
+    const frame = await computerUseCoordinator.captureFrame(source);
+    res.json({ frame, state: computerUseCoordinator.getPublicState() });
+  } catch (err: any) {
+    res.status(400).json({ error: err?.message || 'Failed to capture screen frame.' });
+  }
+});
+
+app.post('/api/computer-use/screen-share-frame', (req, res) => {
+  try {
+    const { imageBase64, mimeType, width, height, label } = req.body || {};
+    if (!imageBase64 || typeof imageBase64 !== 'string') {
+      return res.status(400).json({ error: 'imageBase64 is required.' });
+    }
+    const frame = computerUseCoordinator.ingestBrowserScreenShareFrame({
+      imageBase64,
+      mimeType,
+      width,
+      height,
+      label,
+    });
+    res.json({ ok: true, frame });
+  } catch (err: any) {
+    res.status(400).json({ error: err?.message || 'Failed to ingest screen share frame.' });
+  }
+});
+
+app.post('/api/computer-use/sandbox/navigate', async (req, res) => {
+  try {
+    const { url } = req.body || {};
+    const frame = await computerUseCoordinator.navigateSandbox(String(url || 'https://example.com'));
+    res.json({ frame, state: computerUseCoordinator.getPublicState() });
+  } catch (err: any) {
+    res.status(400).json({ error: err?.message || 'Sandbox navigation failed.' });
+  }
+});
+
+app.post('/api/computer-use/run', async (req, res) => {
+  try {
+    const { goal, targetMode, startUrl, maxSteps } = req.body || {};
+    if (!goal || typeof goal !== 'string') {
+      return res.status(400).json({ error: 'A task "goal" string is required.' });
+    }
+    const session = await computerUseCoordinator.runTask({
+      goal: goal.trim(),
+      targetMode,
+      startUrl,
+      maxSteps,
+    });
+    res.json({ session, state: computerUseCoordinator.getPublicState() });
+  } catch (err: any) {
+    res.status(500).json({ error: err?.message || 'Computer Use run failed.' });
+  }
+});
+
+app.post('/api/computer-use/confirm', async (req, res) => {
+  try {
+    const { confirmationId, approved } = req.body || {};
+    const session = await computerUseCoordinator.resolveConfirmation(
+      String(confirmationId || ''),
+      Boolean(approved)
+    );
+    res.json({ session, state: computerUseCoordinator.getPublicState() });
+  } catch (err: any) {
+    res.status(500).json({ error: err?.message || 'Confirmation handling failed.' });
+  }
+});
+
+app.post('/api/computer-use/stop', (req, res) => {
+  const reason = req.body?.reason ? String(req.body.reason) : 'Stopped by user kill switch.';
+  const session = computerUseCoordinator.abortSession(reason);
+  res.json({ session, state: computerUseCoordinator.getPublicState() });
+});
+
 // Chat endpoint with memory integration, emotional state extraction & Decision 1.0 telemetry
 app.post('/api/chat', async (req, res) => {
   try {
@@ -1814,8 +1941,45 @@ Keep it warm, structured, and bullet-pointed for quick context injection.`,
   }
 });
 
-// WebSocket Server for Gemini Live API (gemini-3.8-live)
-const wss = new WebSocketServer({ server, path: '/api/live-ws' });
+// WebSocket Servers (shared upgrade router for Gemini Live + Computer Use Bridge/UI)
+const wss = new WebSocketServer({ noServer: true });
+const computerBridgeWss = new WebSocketServer({ noServer: true });
+
+computerBridgeWss.on('connection', (ws: WebSocket, req: http.IncomingMessage) => {
+  const urlObj = new URL(req.url || '/api/computer-bridge-ws', 'http://localhost');
+  const role = urlObj.searchParams.get('role') || 'ui';
+  const token = urlObj.searchParams.get('token') || '';
+
+  if (role === 'bridge') {
+    if (!computerUseCoordinator.validatePairingToken(token)) {
+      ws.close(4001, 'Invalid or expired pairing token');
+      return;
+    }
+    console.log('[ComputerUse] Local Desktop Bridge paired over WebSocket');
+    computerUseCoordinator.attachBridgeSocket(ws, token);
+  } else {
+    computerUseCoordinator.registerUiClient(ws);
+  }
+});
+
+server.on('upgrade', (request, socket, head) => {
+  try {
+    const pathname = new URL(request.url || '/', 'http://localhost').pathname;
+    if (pathname === '/api/live-ws') {
+      wss.handleUpgrade(request, socket, head, (ws) => {
+        wss.emit('connection', ws, request);
+      });
+    } else if (pathname === '/api/computer-bridge-ws') {
+      computerBridgeWss.handleUpgrade(request, socket, head, (ws) => {
+        computerBridgeWss.emit('connection', ws, request);
+      });
+    } else {
+      socket.destroy();
+    }
+  } catch {
+    socket.destroy();
+  }
+});
 
 wss.on('connection', async (clientWs: WebSocket) => {
   console.log('Client connected to Live Voice WebSocket');
@@ -1923,7 +2087,7 @@ wss.on('connection', async (clientWs: WebSocket) => {
           `
 CRITICAL AGENTIC VOICE & TOOL EXECUTION INSTRUCTIONS:
 - You are Sofia / Matilda (Tilly), a truly AGENTIC voice companion and assistant.
-- Whenever the user gives a voice command or asks you to do something (search the web/weather/news, play/pause/skip Spotify music, check Google Calendar/Gmail/Tasks/Drive, search GitHub, take a note, do math, or trigger an installed custom plugin), ACTIVELY CALL THE APPROPRIATE TOOL right away!
+- Whenever the user gives a voice command or asks you to do something (capture or inspect screen, click, drag, scroll, type, open apps, search the web/weather/news, play/pause/skip Spotify music, check Google Calendar/Gmail/Tasks/Drive, search GitHub, take a note, do math, or trigger an installed custom plugin), ACTIVELY CALL THE APPROPRIATE TOOL right away!
 - Never pretend to execute a tool without calling the function declaration first.
 - Registered Skill Plugins currently available to you:
 ${activeSkillList}

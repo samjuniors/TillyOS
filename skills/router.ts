@@ -206,6 +206,23 @@ export function inferToolCallFromUtterance(
     return { toolName: 'calculate_or_time', args: { expression: clean } };
   }
 
+  if (skillName === 'computer_use') {
+    if (/\b(stop|halt|abort|cancel)\b.*\b(computer|screen|clicking|task|automation)\b/i.test(lower)) {
+      return { toolName: 'stop_computer_task', args: {} };
+    }
+    if (/\b(what(?:'s| is)\s+on\s+my\s+screen|look\s+at\s+my\s+screen|capture\s+(?:the\s+)?screen|take\s+a\s+screenshot|inspect\s+screen)\b/i.test(lower)) {
+      return { toolName: 'inspect_current_screen', args: { question: clean } };
+    }
+    const urlMatch = clean.match(/https?:\/\/[^\s]+/i);
+    return {
+      toolName: 'execute_computer_task',
+      args: {
+        goal: clean,
+        ...(urlMatch ? { startUrl: urlMatch[0] } : {}),
+      },
+    };
+  }
+
   // Custom plugin parameter binding
   const skill = skillRegistry.getSkill(skillName);
   const firstTool = skill?.tool_declarations?.[0];
@@ -300,6 +317,15 @@ export async function routeVoiceTurnWithDecision1(
       selectedChoice = 'productivity_agent';
       confidence = 0.92;
       probabilities = { productivity_agent: 0.92, general_chat: 0.08 };
+    } else if (
+      /(screenshot|screen share|on my screen|capture screen|click\s|double click|right click|drag\s|scroll\s|open app|launch\s|open calculator|open notepad|open chrome|open terminal|open vs\s?code|open finder|browser sandbox|control my computer)/i.test(
+        lower
+      ) &&
+      skillRegistry.getSkill('computer_use')
+    ) {
+      selectedChoice = 'computer_use';
+      confidence = 0.94;
+      probabilities = { computer_use: 0.94, general_chat: 0.06 };
     } else {
       selectedChoice = 'general_chat';
       confidence = 0.91;

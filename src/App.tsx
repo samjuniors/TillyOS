@@ -22,6 +22,8 @@ import {
   AlertTriangle,
   ShieldCheck,
   X,
+  Monitor,
+  Square,
 } from 'lucide-react';
 import {
   Message,
@@ -34,6 +36,7 @@ import {
   VoiceSkillTurnTrace,
   CustomPluginInstallSpec,
   OAuthProviderStatus,
+  ComputerUsePublicState,
 } from './types';
 import { useMemory } from './hooks/useMemory';
 import {
@@ -50,6 +53,9 @@ import {
   discoverOAuthWebsite,
   configureOAuthConnector,
   deleteOAuthConnector,
+  fetchComputerUseState,
+  confirmComputerAction,
+  stopComputerTask,
 } from './services/api';
 import {
   initWorkspaceAuth,
@@ -68,6 +74,7 @@ import { PersonaSettingsModal } from './components/PersonaSettingsModal';
 import { AdviceJournalModal } from './components/AdviceJournalModal';
 import { DecisionEngineModal } from './components/DecisionEngineModal';
 import { AgentSkillsPanel } from './components/AgentSkillsPanel';
+import { ComputerUseStudio } from './components/ComputerUseStudio';
 
 const DEFAULT_SETTINGS: PersonaSettings = {
   slangLevel: 'everyday',
@@ -150,6 +157,39 @@ export default function App() {
   const [oauthProviders, setOauthProviders] = useState<OAuthProviderStatus[]>([]);
   const [pendingConfirmation, setPendingConfirmation] = useState<VoiceSkillTurnTrace | null>(null);
   const [isConfirmingAction, setIsConfirmingAction] = useState(false);
+
+  // Hybrid Computer Use Studio State
+  const [isComputerUseOpen, setIsComputerUseOpen] = useState(false);
+  const [isConfirmingComputerAction, setIsConfirmingComputerAction] = useState(false);
+  const [computerState, setComputerState] = useState<ComputerUsePublicState>({
+    targetMode: 'hybrid',
+    bridge: { connected: false },
+    sandbox: {
+      ready: false,
+      launching: false,
+      currentUrl: 'about:blank',
+      pageTitle: 'Cloud Browser Sandbox',
+      viewportWidth: 1280,
+      viewportHeight: 720,
+      error: null,
+    },
+    latestFrame: null,
+    session: {
+      sessionId: 'cu-idle',
+      goal: '',
+      targetMode: 'hybrid',
+      status: 'idle',
+      maxSteps: 8,
+      currentStep: 0,
+      summary: 'Ready for Desktop Bridge or Browser Sandbox commands.',
+      error: null,
+      startedAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      steps: [],
+      pendingConfirmation: null,
+      lastCoords: null,
+    },
+  });
 
   // Settings
   const [settings, setSettings] = useState<PersonaSettings>(() => {
@@ -238,6 +278,10 @@ export default function App() {
 
       case 'open_decision_engine':
         setIsDecisionModalOpen(true);
+        break;
+
+      case 'open_computer_use':
+        setIsComputerUseOpen(true);
         break;
 
       case 'web_search':
@@ -394,7 +438,36 @@ export default function App() {
     };
     window.addEventListener('message', handleOAuthMessage);
 
+    // Subscribe to real-time Computer Use Studio state (Desktop Bridge frames + Sandbox + Safety Gates)
+    let cuWs: WebSocket | null = null;
+    let cuClosed = false;
+    fetchComputerUseState()
+      .then((st) => setComputerState(st))
+      .catch(() => {});
+
+    const connectComputerWs = () => {
+      if (cuClosed) return;
+      const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      cuWs = new WebSocket(`${proto}//${window.location.host}/api/computer-bridge-ws?role=ui`);
+      cuWs.onmessage = (ev) => {
+        try {
+          const payload = JSON.parse(ev.data);
+          if (payload.type === 'computer_state' && payload.state) {
+            setComputerState(payload.state);
+          }
+        } catch {}
+      };
+      cuWs.onclose = () => {
+        if (!cuClosed) {
+          setTimeout(connectComputerWs, 3000);
+        }
+      };
+    };
+    connectComputerWs();
+
     return () => {
+      cuClosed = true;
+      cuWs?.close();
       unsubscribeAuth();
       window.removeEventListener('message', handleOAuthMessage);
     };
@@ -1183,6 +1256,36 @@ export default function App() {
             <Music className="w-4 h-4" />
           </button>
 
+          {/* Computer Use Studio Toggle + Emergency Stop Indicator */}
+          <button
+            onClick={() => setIsComputerUseOpen(true)}
+            className={`px-2.5 py-1.5 rounded-xl border transition-all flex items-center gap-1.5 text-xs font-semibold cursor-pointer ${
+              isComputerUseOpen || computerState.session.status === 'running'
+                ? 'bg-amber-500 text-stone-950 border-amber-400 shadow-md shadow-amber-500/20'
+                : 'bg-stone-900 border-stone-800 text-stone-200 hover:bg-stone-800 hover:border-amber-500/50'
+            }`}
+            title="Open Hybrid Computer Use Studio (Desktop Bridge & Browser Sandbox)"
+          >
+            <Monitor className="w-3.5 h-3.5 text-amber-400" />
+            <span className="hidden sm:inline font-mono text-[11px]">COMPUTER</span>
+            {computerState.bridge.connected && (
+              <span className="px-1 py-0.2 rounded text-[9px] font-mono bg-emerald-950 text-emerald-300 border border-emerald-700/60">
+                BRIDGE
+              </span>
+            )}
+          </button>
+
+          {computerState.session.status === 'running' && (
+            <button
+              onClick={() => stopComputerTask('Emergency STOP pressed from header').then((r) => setComputerState(r.state)).catch(() => {})}
+              className="px-2.5 py-1.5 rounded-xl bg-red-600 hover:bg-red-700 text-white text-xs font-bold flex items-center gap-1 cursor-pointer"
+              title="Emergency STOP Computer Automation"
+            >
+              <Square className="w-3 h-3 fill-current" />
+              <span>STOP</span>
+            </button>
+          )}
+
           {/* Agent Skills & Plugin Registry Toggle Button */}
           <button
             onClick={() => setIsSkillsPanelOpen(!isSkillsPanelOpen)}
@@ -1337,6 +1440,13 @@ export default function App() {
             >
               <Cpu className="w-3 h-3" />
               <span>Decision 1 Console</span>
+            </button>
+            <button
+              onClick={() => setIsComputerUseOpen(true)}
+              className="px-2.5 py-1 rounded-full bg-stone-900/90 hover:bg-stone-800 text-amber-200 border border-amber-500/40 text-[11px] font-medium transition-colors flex items-center gap-1 cursor-pointer"
+            >
+              <Monitor className="w-3 h-3 text-amber-400" />
+              <span>Computer Use Studio</span>
             </button>
           </div>
         </div>
@@ -1524,6 +1634,122 @@ export default function App() {
           handleExecuteUIAction(action);
         }}
       />
+
+      {/* Hybrid Computer Use Studio Drawer */}
+      <ComputerUseStudio
+        isOpen={isComputerUseOpen}
+        onClose={() => setIsComputerUseOpen(false)}
+        computerState={computerState}
+        onStateChange={(next) => setComputerState(next)}
+        onLog={addLog}
+      />
+
+      {/* Explicit Risky Computer Use Confirmation Modal (Always visible when paused for safety) */}
+      {computerState.session.pendingConfirmation && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm p-4">
+          <div className="w-full max-w-lg rounded-xl bg-[#1C1917] border border-amber-500/60 shadow-2xl p-5 space-y-4">
+            <div className="flex items-start justify-between gap-3">
+              <div className="flex items-center gap-2.5">
+                <div className="w-9 h-9 rounded-lg bg-amber-500/15 border border-amber-500/40 flex items-center justify-center text-amber-400">
+                  <AlertTriangle className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="text-sm font-bold text-white" style={{ fontFamily: "'Outfit', sans-serif" }}>
+                    Confirm Computer Action
+                  </h3>
+                  <p className="text-[11px] font-mono text-amber-300">
+                    {computerState.session.pendingConfirmation.action} ·{' '}
+                    {computerState.session.pendingConfirmation.targetUsed}
+                  </p>
+                </div>
+              </div>
+              <button
+                onClick={async () => {
+                  const id = computerState.session.pendingConfirmation?.confirmationId || '';
+                  setIsConfirmingComputerAction(true);
+                  try {
+                    const res = await confirmComputerAction(id, false);
+                    setComputerState(res.state);
+                  } finally {
+                    setIsConfirmingComputerAction(false);
+                  }
+                }}
+                className="p-1 rounded-lg text-stone-400 hover:text-white hover:bg-stone-800 cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <p className="text-xs text-stone-200 leading-relaxed">
+              {computerState.session.pendingConfirmation.riskReason}
+            </p>
+
+            {computerState.session.pendingConfirmation.previewImageBase64 && (
+              <div className="relative rounded-lg overflow-hidden border border-stone-800 bg-black aspect-video">
+                <img
+                  src={`data:${computerState.session.pendingConfirmation.previewMimeType || 'image/jpeg'};base64,${computerState.session.pendingConfirmation.previewImageBase64}`}
+                  alt="Confirmation Screen Preview"
+                  className="w-full h-full object-contain"
+                />
+                {computerState.session.pendingConfirmation.normalizedCoords?.x !== undefined && (
+                  <svg viewBox="0 0 1000 1000" preserveAspectRatio="none" className="absolute inset-0 w-full h-full pointer-events-none">
+                    <circle
+                      cx={computerState.session.pendingConfirmation.normalizedCoords.x}
+                      cy={computerState.session.pendingConfirmation.normalizedCoords.y}
+                      r="24"
+                      fill="rgba(245, 158, 11, 0.22)"
+                      stroke="#F59E0B"
+                      strokeWidth="4"
+                    />
+                  </svg>
+                )}
+              </div>
+            )}
+
+            <pre className="p-3 rounded-lg bg-[#0C0A09] border border-stone-800 text-[11px] font-mono text-amber-200 overflow-x-auto max-h-28">
+              {JSON.stringify(computerState.session.pendingConfirmation.args, null, 2)}
+            </pre>
+
+            <div className="flex items-center justify-end gap-2 pt-1">
+              <button
+                onClick={async () => {
+                  const id = computerState.session.pendingConfirmation?.confirmationId || '';
+                  setIsConfirmingComputerAction(true);
+                  try {
+                    const res = await confirmComputerAction(id, false);
+                    setComputerState(res.state);
+                    addLog('COMPUTER USE: Risky action cancelled by user');
+                  } finally {
+                    setIsConfirmingComputerAction(false);
+                  }
+                }}
+                disabled={isConfirmingComputerAction}
+                className="px-4 py-2 rounded-lg bg-stone-800 hover:bg-stone-700 text-stone-200 text-xs font-semibold cursor-pointer"
+              >
+                Cancel Task
+              </button>
+              <button
+                onClick={async () => {
+                  const id = computerState.session.pendingConfirmation?.confirmationId || '';
+                  setIsConfirmingComputerAction(true);
+                  try {
+                    const res = await confirmComputerAction(id, true);
+                    setComputerState(res.state);
+                    addLog(`COMPUTER USE: Approved & executed ${computerState.session.pendingConfirmation?.action || 'action'}`);
+                  } finally {
+                    setIsConfirmingComputerAction(false);
+                  }
+                }}
+                disabled={isConfirmingComputerAction}
+                className="px-4 py-2 rounded-lg bg-amber-500 hover:bg-amber-400 text-stone-950 text-xs font-bold flex items-center gap-1.5 disabled:opacity-50 cursor-pointer"
+              >
+                <ShieldCheck className="w-4 h-4" />
+                <span>{isConfirmingComputerAction ? 'Executing...' : 'Approve & Execute'}</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Explicit In-App Confirmation Modal for Mutating Workspace Actions */}
       {pendingConfirmation?.toolResult?.requiresConfirmation && (
