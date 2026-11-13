@@ -1,0 +1,6 @@
+{
+  "name": "Matilda - Australian Voice Friend & Companion",
+  "description": "A warm, thoughtful Australian voice companion who remembers your past conversations, listens like a close friend, and shares heartfelt advice.",
+  "requestFramePermissions": ["microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
